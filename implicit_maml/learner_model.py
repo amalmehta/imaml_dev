@@ -4,6 +4,8 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 import implicit_maml.utils as utils
 from   torch.nn import functional as F
+from iq_learn.make_envs import make_env
+from iq_learn.agent import make_agent
 
 class Learner:
     def __init__(self, model, loss_function, inner_lr=1e-3, outer_lr=1e-2, GPU=False, inner_alg='gradient', outer_alg='adam'):
@@ -187,45 +189,12 @@ def make_fc_network(in_dim=1, out_dim=1, hidden_sizes=(40,40), float16=False):
         return model
 
     
-def make_conv_network(in_channels, out_dim, task='Omniglot', filter_size=32):
-    assert task == 'Omniglot' or 'MiniImageNet'
-    model = nn.Sequential()
+def make_conv_network(args, task='PickPlaceMetaWorld'):
+    assert task == 'PickPlaceMetaWorld'
     
-    if task == 'MiniImageNet':
-        model = model_imagenet_arch(in_channels, out_dim, filter_size)
-        
-    elif task == 'Omniglot':
-        num_filters = 64
-        conv_stride = 2
-        pool_stride = None
-    
-        model.add_module('conv1', nn.Conv2d(in_channels=in_channels, out_channels=num_filters,
-                                            kernel_size=3, stride=conv_stride, padding=1))
-        model.add_module('BN1', nn.BatchNorm2d(num_filters, track_running_stats=False))
-        model.add_module('relu1', nn.ReLU())
-        model.add_module('conv2', nn.Conv2d(in_channels=num_filters, out_channels=num_filters,
-                                            kernel_size=3, stride=conv_stride, padding=1))
-        model.add_module('BN2', nn.BatchNorm2d(num_filters, track_running_stats=False))
-        model.add_module('relu2', nn.ReLU())
-        model.add_module('pad2', nn.ZeroPad2d((0, 1, 0, 1)))
-        model.add_module('conv3', nn.Conv2d(in_channels=num_filters, out_channels=num_filters,
-                                            kernel_size=3, stride=conv_stride, padding=1))
-        model.add_module('BN3', nn.BatchNorm2d(num_filters, track_running_stats=False))
-        model.add_module('relu3', nn.ReLU())
-        model.add_module('conv4', nn.Conv2d(in_channels=num_filters, out_channels=num_filters,
-                                        kernel_size=3, stride=conv_stride, padding=1))
-        model.add_module('BN4', nn.BatchNorm2d(num_filters, track_running_stats=False))
-        model.add_module('relu4', nn.ReLU())
-        model.add_module('flatten', Flatten())
-        model.add_module('fc1', nn.Linear(2*2*num_filters, out_dim))
-        
-    for layer in [model.conv1, model.conv2, model.conv3, model.conv4, model.fc1]:
-        torch.nn.init.xavier_uniform_(layer.weight, gain=1.73)
-        try:
-            torch.nn.init.uniform_(layer.bias, a=0.0, b=0.05)
-        except:
-            print("Bias layer not detected for layer:", layer)
-            pass
+    if task == 'Omniglot':
+        env = make_env(args)
+        model= make_agent(env, args)
     
     return model
 
