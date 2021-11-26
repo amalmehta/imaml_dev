@@ -13,6 +13,7 @@ from implicit_maml.dataset import OmniglotTask, OmniglotFewShotDataset
 from implicit_maml.learner_model import Learner
 from implicit_maml.learner_model import make_fc_network, make_conv_network
 from implicit_maml.utils import DataLog
+from iq_learn.train_iq import get_buffers
 
 import matplotlib.pyplot as plt
 
@@ -51,6 +52,7 @@ parser.add_argument('--taylor_approx', type=bool, default=False, help='Use Neuma
 parser.add_argument('--inner_alg', type=str, default='gradient', help='gradient or sqp for inner solve')
 parser.add_argument('--load_agent', type=str, default=None)
 parser.add_argument('--load_tasks', type=str, default=None)
+parser.add_argument('--method_loss', type = str, default = 'value_expert')
 args = parser.parse_args()
 logger.log_exp_args(args)
 
@@ -65,11 +67,11 @@ else:
     dataset = OmniglotFewShotDataset(task_defs=task_defs, GPU=args.use_gpu)
 
 if args.load_agent is None:
-    learner_net = make_conv_network(in_channels=1, out_dim=args.N_way)
-    fast_net = make_conv_network(in_channels=1, out_dim=args.N_way)
-    meta_learner = Learner(model=learner_net, loss_function=torch.nn.CrossEntropyLoss(), inner_alg=args.inner_alg,
+    learner_net = make_conv_network(args)
+    fast_net = make_conv_network(args)
+    meta_learner = Learner(model=learner_net, loss_function=args.method_loss, inner_alg=args.inner_alg,
                            inner_lr=args.inner_lr, outer_lr=args.outer_lr, GPU=args.use_gpu)
-    fast_learner = Learner(model=fast_net, loss_function=torch.nn.CrossEntropyLoss(), inner_alg=args.inner_alg,
+    fast_learner = Learner(model=fast_net, loss_function=args.method_loss, inner_alg=args.inner_alg,
                            inner_lr=args.inner_lr, outer_lr=args.outer_lr, GPU=args.use_gpu)
 else:
     meta_learner = pickle.load(open(args.load_agent, 'rb'))
@@ -103,18 +105,24 @@ for outstep in tqdm(range(args.meta_steps)):
     for idx in task_mb:
         fast_learner.set_params(w_k.clone()) # sync weights
         task = dataset.__getitem__(idx) # get task
-        vl_before = fast_learner.get_loss(task['x_val'], task['y_val'], return_numpy=True)
+        expert_memory_replay, online_memory_replay = get_buffers(env,args,EPISODE_STEPS, REPLAY_MEMORY, INITIAL_MEMORY, fast_learner)
+        policy_batch = online_memory_replay.get_samples(args.train.batch, args.device)
+        expert_batch = expert_memory_replay.get_samples(args.train.batch, args.device)
+        vl_before = fast_learner.get_loss(args, expert_batch, policy_batch,return_numpy=True)
         tl = fast_learner.learn_task(task, num_steps=args.n_steps)
         # pull back for regularization
         fast_learner.inner_opt.zero_grad()
         regu_loss = fast_learner.regularization_loss(w_k, lam)
         regu_loss.backward()
         fast_learner.inner_opt.step()
-        vl_after = fast_learner.get_loss(task['x_val'], task['y_val'], return_numpy=True)
+        vl_after = fast_learner.get_loss(args, expert_batch, policy_batch,return_numpy=True)
         tacc = utils.measure_accuracy(task, fast_learner, train=True)
         vacc = utils.measure_accuracy(task, fast_learner, train=False)
-        
-        valid_loss = fast_learner.get_loss(task['x_val'], task['y_val'])
+        #Validation Set Batch
+        policy_batch = online_memory_replay.get_samples(args.train.batch, args.device)
+        expert_batch = expert_memory_replay.get_samples(args.train.batch, args.device)
+        #Validation Set Batch
+        valid_loss = fast_learner.get_loss(args, expert_batch, policy_batch,return_numpy=True)
         valid_grad = torch.autograd.grad(valid_loss, fast_learner.model.parameters())
         flat_grad = torch.cat([g.contiguous().view(-1) for g in valid_grad])
         
