@@ -17,7 +17,7 @@ from iq_learn.memory import Memory
 from iq_learn.logger import Logger
 import hydra
 import types
-from iq_learn.train_iq import irl_update, save, get_buffers
+from iq_learn.train_iq import irl_update, save, get_buffers, irl_update_inner, ilr_update_critic2
 from wrappers.atari_wrapper import LazyFrames
 import wandb
 
@@ -85,16 +85,27 @@ class Learner:
 
     def get_loss(self, args, expert_batch, policy_batch, return_numpy=False):
         logger = Logger(args.log_dir)
-        steps = 0
-        if self.args.offline:
-            obs = expert_batch[0]
-        else:
-            # Use both policy and expert observations
-            obs = torch.cat([policy_batch[0], expert_batch[0]], dim=0)
-        actor_alpha_losses = self.model.update_actor_and_alpha(obs, logger, steps)
-        
+        step =0
+        self.model.ilr_update_critic = types.MethodType(ilr_update_critic2, self.model)
+        losses = self.ilr_update_critic2(policy_batch, expert_batch, logger, step)
+
+        if self.actor and step % self.actor_update_frequency == 0:
+            if not self.args.agent.vdice_actor:
+
+                if self.args.offline:
+                    obs = expert_batch[0]
+                else:
+                    # Use both policy and expert observations
+                    obs = torch.cat([policy_batch[0], expert_batch[0]], dim=0)
+
+                if self.args.num_actor_updates:
+                    for i in range(self.args.num_actor_updates):
+                        actor_alpha_losses = self.model.update_actor_and_alpha(obs, logger, step)
+
+                # actor_alpha_losses = self.update_actor_and_alpha(obs, logger, step)
+                losses.update(actor_alpha_losses)
         if return_numpy:
-                losses = utils.to_numpy(actor_alpha_losses).ravel()[0]
+                losses = utils.to_numpy(losses).ravel()[0]
         return losses
 
     def predict(self, x, return_numpy=False):
@@ -336,7 +347,7 @@ def make_fc_network(in_dim=1, out_dim=1, hidden_sizes=(40,40), float16=False):
 def make_conv_network(args, task='PickPlaceMetaWorld'):
     assert task == 'PickPlaceMetaWorld'
     
-    if task == 'Omniglot':
+    if task == 'PickPlaceMetaWorld':
         env = make_env(args)
         model= make_agent(env, args)
     

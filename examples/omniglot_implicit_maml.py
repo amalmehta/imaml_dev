@@ -105,6 +105,11 @@ for outstep in tqdm(range(args.meta_steps)):
     for idx in task_mb:
         fast_learner.set_params(w_k.clone()) # sync weights
         task = dataset.__getitem__(idx) # get task
+        #Incorporate Demos from Sebastian Task Limitation 
+        #C
+        #TODO: INcorporate Demos - Check metwaorld task id
+        #
+        #
         expert_memory_replay, online_memory_replay = get_buffers(env,args,EPISODE_STEPS, REPLAY_MEMORY, INITIAL_MEMORY, fast_learner)
         policy_batch = online_memory_replay.get_samples(args.train.batch, args.device)
         expert_batch = expert_memory_replay.get_samples(args.train.batch, args.device)
