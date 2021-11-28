@@ -247,15 +247,8 @@ class Learner:
         return loss
 
 
-
-    def learn_task(self, task, env_args, env, eval_env, args, num_steps=10, add_regularization=False, w_0=None, lam=0.0):
+    def learn_task(self, expert_memory_replay, env_args, env, eval_env, args, num_steps=10, add_regularization=False, w_0=None, lam=0.0):
         REPLAY_MEMORY = int(env_args.replay_mem)
-        expert_memory_replay = Memory(REPLAY_MEMORY//2, args.seed)
-        expert_memory_replay.load(hydra.utils.to_absolute_path(f'experts/{args.env.demo}'),
-                              num_trajs=args.eval.demos,
-                              sample_freq=args.eval.subsample_freq,
-                              seed=args.seed + 42)
-        print(f'--> Expert memory size: {expert_memory_replay.size()}')
         return self.learn_on_data(self, env_args, env,eval_env,args, expert_memory_replay, num_steps=10,
                       add_regularization=False,
                       w_0=None, lam=0.0)

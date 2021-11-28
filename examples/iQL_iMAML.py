@@ -180,7 +180,8 @@ for outstep in tqdm(range(args.meta_steps)):
         policy_batch = online_memory_replay.get_samples(args.train.batch, args.device)
         expert_batch = expert_memory_replay.get_samples(args.train.batch, args.device)
         vl_before = fast_learner.get_loss(args, expert_batch, policy_batch,return_numpy=True)
-        tl = fast_learner.learn_task(task, num_steps=args.n_steps)
+        
+        tl = fast_learner.learn_task(expert_memory_replay, env_args, env, eval_env, args, num_steps=args.num_steps, add_regularization=False, w_0=None, lam=0.0)
         # pull back for regularization
         fast_learner.inner_opt.zero_grad()
         regu_loss = fast_learner.regularization_loss(w_k, lam)
