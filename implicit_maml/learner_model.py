@@ -17,7 +17,7 @@ from iq_learn.memory import Memory
 from iq_learn.logger import Logger
 import hydra
 import types
-from iq_learn.train_iq import irl_update, save, get_buffers, irl_update_inner, ilr_update_critic2
+from iq_learn.train_iq import irl_update, save, get_buffers, irl_update_inner, ilr_update_critic2, ilr_update_critic
 from wrappers.atari_wrapper import LazyFrames
 import wandb
 
@@ -104,9 +104,11 @@ class Learner:
 
                 # actor_alpha_losses = self.update_actor_and_alpha(obs, logger, step)
                 losses.update(actor_alpha_losses)
+
+        passedlosses = losses["total_loss"]    
         if return_numpy:
-                losses = utils.to_numpy(losses).ravel()[0]
-        return losses
+                passedlosses = utils.to_numpy(losses).ravel()[0]
+        return passedlosses
 
     def predict(self, x, return_numpy=False):
         yhat = self.model.forward(utils.to_device(x, self.use_gpu))
@@ -344,7 +346,7 @@ def make_fc_network(in_dim=1, out_dim=1, hidden_sizes=(40,40), float16=False):
         return model
 
     
-def make_conv_network(args, task='PickPlaceMetaWorld'):
+def make_SAC_network(args, task='PickPlaceMetaWorld'):
     assert task == 'PickPlaceMetaWorld'
     
     if task == 'PickPlaceMetaWorld':

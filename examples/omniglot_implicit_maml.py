@@ -3,18 +3,28 @@ import torch
 import torch.nn as nn
 import implicit_maml.utils as utils
 import random
-import time as timer
+import time 
 import pickle
 import argparse
 import pathlib
+import datetime
+from tensorboardx import SummaryWriter
+import os
+from collections import deque
 
+#local imports
 from tqdm import tqdm
-from implicit_maml.dataset import OmniglotTask, OmniglotFewShotDataset
 from implicit_maml.learner_model import Learner
-from implicit_maml.learner_model import make_fc_network, make_conv_network
+from implicit_maml.learner_model import make_fc_network, make_SAC_network
 from implicit_maml.utils import DataLog
 from iq_learn.train_iq import get_buffers
-
+from iq_learn.memory import Memory
+from iq_learn.logger import Logger
+from garage.envs import MetaWorldSetTaskEnv
+from garage.experiment import (MetaEvaluator, MetaWorldTaskSampler,
+                               SetTaskSampler)
+from iq_learn.mw.record_demos import DemosRepository
+import metaworld
 import matplotlib.pyplot as plt
 
 np.random.seed(123)
@@ -22,14 +32,10 @@ torch.manual_seed(123)
 random.seed(123)
 logger = DataLog()
 
-# There are 1623 characters
-train_val_permutation = list(range(1623))
-random.shuffle(train_val_permutation)
-
 # ===================
 # hyperparameters
 # ===================
-parser = argparse.ArgumentParser(description='Implicit MAML on Omniglot dataset')
+parser = argparse.ArgumentParser(description='Implicit MAML + iQLearn on MetaWorld Tasks')
 parser.add_argument('--data_dir', type=str, default='/home/aravind/data/omniglot-py/',
                     help='location of the dataset')
 parser.add_argument('--N_way', type=int, default=5, help='number of classes for few shot learning tasks')
@@ -56,19 +62,10 @@ parser.add_argument('--method_loss', type = str, default = 'value_expert')
 args = parser.parse_args()
 logger.log_exp_args(args)
 
-print("Generating tasks ...... ")
-if args.load_tasks is None:
-    task_defs = [OmniglotTask(train_val_permutation, root=args.data_dir, num_cls=args.N_way, num_inst=args.K_shot) for _ in tqdm(range(args.num_tasks))]
-    dataset = OmniglotFewShotDataset(task_defs=task_defs, GPU=args.use_gpu)
-else:
-    task_defs = pickle.load(open(args.load_tasks, 'rb'))
-    assert args.N_way == task_defs[0].num_cls and args.K_shot == task_defs[0].num_inst and args.num_tasks <= len(task_defs)
-    task_defs = task_defs[:args.num_tasks]
-    dataset = OmniglotFewShotDataset(task_defs=task_defs, GPU=args.use_gpu)
-
+print("Generating Creating Models ")
 if args.load_agent is None:
-    learner_net = make_conv_network(args)
-    fast_net = make_conv_network(args)
+    learner_net = make_SAC_network(args)
+    fast_net = make_SAC_network(args)
     meta_learner = Learner(model=learner_net, loss_function=args.method_loss, inner_alg=args.inner_alg,
                            inner_lr=args.inner_lr, outer_lr=args.outer_lr, GPU=args.use_gpu)
     fast_learner = Learner(model=fast_net, loss_function=args.method_loss, inner_alg=args.inner_alg,
@@ -90,6 +87,57 @@ lam = lam.to(device)
 
 pathlib.Path(args.save_dir).mkdir(parents=True, exist_ok=True)
 
+
+#===============================
+random.seed(args.seed)
+np.random.seed(args.seed)
+torch.manual_seed(args.seed)
+
+env_args = args.env
+
+REPLAY_MEMORY = int(env_args.replay_mem)
+INITIAL_MEMORY = int(env_args.initial_mem)
+EPISODE_STEPS = int(env_args.eps_steps)
+EPISODE_WINDOW = int(env_args.eps_window)
+LEARN_STEPS = int(env_args.learn_steps)
+
+online_memory_replay = Memory(REPLAY_MEMORY//2, args.seed+1)
+
+ts_str = datetime.datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d_%H-%M-%S")
+log_dir = os.path.join(args.log_dir, args.env.name, args.exp_name, ts_str)
+writer = SummaryWriter(log_dir=log_dir)
+print(f'--> Saving logs at: {log_dir}')
+# TODO: Fix logging
+logger = Logger(args.log_dir)
+
+steps = 0
+
+# track avg. reward and scores
+scores_window = deque(maxlen=EPISODE_WINDOW)  # last N scores
+rewards_window = deque(maxlen=EPISODE_WINDOW)  # last N rewards
+best_eval_returns = -np.inf
+
+learn_steps = 0
+begin_learn = False
+episode_reward = 0
+
+benchmark = None
+if env_args.mw_benchmark == 'ml1':
+    benchmark = metaworld.ML1(env_args.mw_task)
+elif env_args.mw_benchmark == 'ml10':
+    benchmark = metaworld.ML10()
+else:
+    raise Exception(f'Unknown Meta-World benchmark {env_args.mw_benchmark}')
+
+train_sampler = MetaWorldTaskSampler(benchmark, 'train')
+test_sampler = SetTaskSampler(MetaWorldSetTaskEnv,
+                                env=MetaWorldSetTaskEnv(benchmark, 'test'))
+
+demos_repo = DemosRepository(args.meta.demos_per_task)
+
+sample_env = train_sampler.sample(args.meta.meta_batch_size)[0]()
+
+
 # ===================
 # Train
 # ===================
@@ -97,20 +145,38 @@ print("Training model ......")
 losses = np.zeros((args.meta_steps, 4))
 accuracy = np.zeros((args.meta_steps, 2))
 for outstep in tqdm(range(args.meta_steps)):
-    task_mb = np.random.choice(args.num_tasks, size=args.task_mb_size)
+    tasks = train_sampler.sample(args.meta.meta_batch_size)
+    print(f'Epoch {outstep}, tasks: {",".join(task._task.task_name for task in tasks)}')
     w_k = meta_learner.get_params()
     meta_grad = 0.0
     lam_grad = 0.0
     
-    for idx in task_mb:
+    for task in tasks:
         fast_learner.set_params(w_k.clone()) # sync weights
-        task = dataset.__getitem__(idx) # get task
-        #Incorporate Demos from Sebastian Task Limitation 
-        #C
-        #TODO: INcorporate Demos - Check metwaorld task id
-        #
-        #
-        expert_memory_replay, online_memory_replay = get_buffers(env,args,EPISODE_STEPS, REPLAY_MEMORY, INITIAL_MEMORY, fast_learner)
+        #task = dataset.__getitem__(idx) # get task
+        env = task._env_type()
+        env.set_task(task._task)
+        eval_env = task._env_type()
+        eval_env.set_task(task._task)
+        # TODO: do we need the separate eval env? Should we set different seeds?
+        # Seed envs
+        #env.seed(args.seed)
+        #eval_env.seed(args.seed + 10)
+        
+        # Obtain demonstrations for the current task.
+        demos = demos_repo.get_demos(task)
+        expert_memory_replay = Memory(REPLAY_MEMORY//2, args.seed)
+        for i in range(len(demos["states"])):
+                # For each step...
+                for j in range(len(demos["states"][i])):
+                    state = demos["states"][i][j]
+                    next_state = demos["next_states"][i][j]
+                    action = demos["actions"][i][j]
+                    reward = demos["rewards"][i][j]
+                    done_no_lim = demos["dones"][i][j]
+                    expert_memory_replay.add((state, next_state, action, reward, done_no_lim))
+                    print(f'--> Expert memory size: {expert_memory_replay.size()}')
+        online_memory_replay = get_buffers(env,args,EPISODE_STEPS, REPLAY_MEMORY, INITIAL_MEMORY, fast_learner)
         policy_batch = online_memory_replay.get_samples(args.train.batch, args.device)
         expert_batch = expert_memory_replay.get_samples(args.train.batch, args.device)
         vl_before = fast_learner.get_loss(args, expert_batch, policy_batch,return_numpy=True)
@@ -121,9 +187,24 @@ for outstep in tqdm(range(args.meta_steps)):
         regu_loss.backward()
         fast_learner.inner_opt.step()
         vl_after = fast_learner.get_loss(args, expert_batch, policy_batch,return_numpy=True)
-        tacc = utils.measure_accuracy(task, fast_learner, train=True)
-        vacc = utils.measure_accuracy(task, fast_learner, train=False)
-        #Validation Set Batch
+        #tacc = utils.measure_accuracy(task, fast_learner, train=True)
+        #vacc = utils.measure_accuracy(task, fast_learner, train=False)
+        
+        
+        #Validation Set Batch - refresh the expert memory replay?
+        demos = demos_repo.get_demos(task)
+        expert_memory_replay = Memory(REPLAY_MEMORY//2, args.seed)
+        for i in range(len(demos["states"])):
+                # For each step...
+                for j in range(len(demos["states"][i])):
+                    state = demos["states"][i][j]
+                    next_state = demos["next_states"][i][j]
+                    action = demos["actions"][i][j]
+                    reward = demos["rewards"][i][j]
+                    done_no_lim = demos["dones"][i][j]
+                    expert_memory_replay.add((state, next_state, action, reward, done_no_lim))
+                    print(f'--> Expert memory size: {expert_memory_replay.size()}')
+        online_memory_replay = get_buffers(eval_env,args,EPISODE_STEPS, REPLAY_MEMORY, INITIAL_MEMORY, fast_learner)
         policy_batch = online_memory_replay.get_samples(args.train.batch, args.device)
         expert_batch = expert_memory_replay.get_samples(args.train.batch, args.device)
         #Validation Set Batch
@@ -138,8 +219,8 @@ for outstep in tqdm(range(args.meta_steps)):
             task_outer_grad = utils.cg_solve(task_matrix_evaluator, flat_grad, args.cg_steps, x_init=None)
         
         meta_grad += (task_outer_grad/args.task_mb_size)
-        losses[outstep] += (np.array([tl[0], vl_before, tl[-1], vl_after])/args.task_mb_size)
-        accuracy[outstep] += np.array([tacc, vacc]) / args.task_mb_size
+        losses[outstep] += (np.array([tl[0], vl_before, tl[-1], vl_after])/args.meta.meta_batch_size)
+        #accuracy[outstep] += np.array([tacc, vacc]) / args.task_mb_size
               
         if args.lam_lr <= 0.0:
             task_lam_grad = 0.0
@@ -151,7 +232,7 @@ for outstep in tqdm(range(args.meta_steps)):
             inner_prod = train_grad.dot(task_outer_grad)
             task_lam_grad = inner_prod / (lam**2 + 0.1)
 
-        lam_grad += (task_lam_grad / args.task_mb_size)
+        lam_grad += (task_lam_grad / args.meta.meta_batch_size)
     
     meta_learner.outer_step_with_grad(meta_grad, flat_grad=True)
     lam_delta = - args.lam_lr * lam_grad
