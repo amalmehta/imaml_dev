@@ -1,0 +1,71 @@
+# @package _global_
+env:
+  # Change the Meta-World task via commandline, e.g.:
+  # python iq_train.py env.mw_task=pick-place-v2 <other args>
+  mw_benchmark: ml1
+  mw_task: pick-place-v2
+  name: ml1.${env.mw_task}
+  learn_steps: 1e5
+  eval_interval: 1e3
+
+  replay_mem: 1e6
+
+  # default max steps in Meta-World
+  eps_steps: 500
+  eps_window: 10
+
+meta:
+  meta_batch_size: 10
+  demos_per_task: 2
+
+eval:
+  policy: 
+  demos: 1
+  subsample_freq: 1
+  threshold: 500
+  render: True
+
+
+agent:
+  name: sac
+  init_temperature: 1e-2
+
+log_interval: 500  # Log every this many steps
+num_actor_updates: 1
+
+train:
+  use_target: true
+  soft_update: true
+  batch: 500
+
+double_q_critic:
+  _target_: agent.sac_models.SingleQCritic
+
+diag_gaussian_actor:
+  log_std_bounds: [-20, 2]
+
+imaml:
+  N_way: 5
+  K_shot: 1
+  inner_lr: 1e-2  #inner loop learning rate
+  outer_lr: 1e-2  #outer loop learning rate
+  n_steps: 16 #number of steps in inner loop
+  meta_steps: 1000 # number of meta steps
+  task_mb_size: 16 
+  lam: 1.0 #regularization in inner steps
+  cg_steps: 5 #Conjugate Gradient Steps
+  cg_damping: 1.0
+  use_gpu: True
+  num_tasks: 20000
+  save_dir: '/tmp'
+  lam_lr: 0.0 #Keep at 0 for now
+  lam_min: 0.0
+  scalar_lam: True #, help='keep regularization as a scalar or diagonal matrix (vector)')
+  taylor_approx: False # help='Use Neumann approximation for (I+eps*A)^-1')
+  inner_alg: 'gradient' # help='gradient or sqp for inner solve')
+  load_agent: None
+  load_tasks: =None
+
+method_loss : 'value_expert'
+seed: 10
+
